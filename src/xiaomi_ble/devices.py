@@ -233,6 +233,10 @@ DEVICE_TYPES: dict[int, DeviceEntry] = {
         name="Odor Eliminator",
         model="SU001-T",
     ),
+    0x1526: DeviceEntry(
+        name="Door Lock",
+        model="viomi.lock.link4s",
+    ),
 }
 
 
