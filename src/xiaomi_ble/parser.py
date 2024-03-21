@@ -9,8 +9,6 @@ import datetime
 import logging
 import math
 import struct
-import sys
-from enum import Enum
 from typing import Any
 
 from bleak import BleakClient
@@ -19,9 +17,10 @@ from bleak_retry_connector import establish_connection
 from bluetooth_data_tools import short_address
 from bluetooth_sensor_state_data import BluetoothData
 from Cryptodome.Cipher import AES
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESCCM
 from home_assistant_bluetooth import BluetoothServiceInfo
 from sensor_state_data import (
-    BaseDeviceClass,
     BinarySensorDeviceClass,
     SensorLibrary,
     SensorUpdate,
@@ -32,43 +31,18 @@ from .const import (
     CHARACTERISTIC_BATTERY,
     SERVICE_HHCCJCY10,
     SERVICE_MIBEACON,
+    SERVICE_SCALE1,
+    SERVICE_SCALE2,
     TIMEOUT_1DAY,
+    EncryptionScheme,
+    ExtendedBinarySensorDeviceClass,
+    ExtendedSensorDeviceClass,
 )
-from .devices import DEVICE_TYPES
+from .devices import DEVICE_TYPES, SLEEPY_DEVICE_MODELS
 from .events import EventDeviceKeys
+from .locks import BLE_LOCK_ACTION, BLE_LOCK_ERROR, BLE_LOCK_METHOD
 
 _LOGGER = logging.getLogger(__name__)
-
-
-class EncryptionScheme(Enum):
-
-    # No encryption is needed to use this device
-    NONE = "none"
-
-    # 12 byte encryption key expected
-    MIBEACON_LEGACY = "mibeacon_legacy"
-
-    # 16 byte encryption key expected
-    MIBEACON_4_5 = "mibeacon_4_5"
-
-
-class ExtendedBinarySensorDeviceClass(BaseDeviceClass):
-    """Device class for additional binary sensors (compared to sensor-state-data)."""
-
-    # On means door left open, Off means door closed
-    DEVICE_FORCIBLY_REMOVED = "device_forcibly_removed"
-
-    # On means door left open, Off means door closed
-    DOOR_LEFT_OPEN = "door_left_open"
-
-    # On means door stuck, Off means clear
-    DOOR_STUCK = "door_stuck"
-
-    # On means door someone knocking on the door, Off means no knocking
-    KNOCK_ON_THE_DOOR = "knock_on_the_door"
-
-    # On means door pried, Off means door not pried
-    PRY_THE_DOOR = "pry_the_door"
 
 
 def to_mac(addr: bytes) -> str:
@@ -79,6 +53,15 @@ def to_mac(addr: bytes) -> str:
 def to_unformatted_mac(addr: str) -> str:
     """Return unformatted MAC address"""
     return "".join(f"{i:02X}" for i in addr[:])
+
+
+def parse_event_properties(
+    event_property: str | None, value: int
+) -> dict[str, int | None] | None:
+    """Convert event property and data to event properties."""
+    if event_property:
+        return {event_property: value}
+    return None
 
 
 # Structured objects for data conversions
@@ -94,62 +77,6 @@ M_STRUCT = struct.Struct("<L")
 P_STRUCT = struct.Struct("<H")
 BUTTON_STRUCT = struct.Struct("<BBB")
 FLOAT_STRUCT = struct.Struct("<f")
-
-# Definition of lock messages
-BLE_LOCK_ERROR = {
-    0xC0DE0000: "frequent unlocking with incorrect password",
-    0xC0DE0001: "frequent unlocking with wrong fingerprints",
-    0xC0DE0002: "operation timeout (password input timeout)",
-    0xC0DE0003: "lock picking",
-    0xC0DE0004: "reset button is pressed",
-    0xC0DE0005: "the wrong key is frequently unlocked",
-    0xC0DE0006: "foreign body in the keyhole",
-    0xC0DE0007: "the key has not been taken out",
-    0xC0DE0008: "error NFC frequently unlocks",
-    0xC0DE0009: "timeout is not locked as required",
-    0xC0DE000A: "failure to unlock frequently in multiple ways",
-    0xC0DE000B: "unlocking the face frequently fails",
-    0xC0DE000C: "failure to unlock the vein frequently",
-    0xC0DE000D: "hijacking alarm",
-    0xC0DE000E: "unlock inside the door after arming",
-    0xC0DE000F: "palmprints frequently fail to unlock",
-    0xC0DE0010: "the safe was moved",
-    0xC0DE1000: "the battery level is less than 10%",
-    0xC0DE1001: "the battery is less than 5%",
-    0xC0DE1002: "the fingerprint sensor is abnormal",
-    0xC0DE1003: "the accessory battery is low",
-    0xC0DE1004: "mechanical failure",
-    0xC0DE1005: "the lock sensor is faulty",
-}
-
-BLE_LOCK_ACTION: dict[int, tuple[int, str, str]] = {
-    0b0000: (1, "lock", "unlock outside the door"),
-    0b0001: (0, "lock", "lock"),
-    0b0010: (0, "antilock", "turn on anti-lock"),
-    0b0011: (1, "antilock", "turn off anti-lock"),
-    0b0100: (1, "lock", "unlock inside the door"),
-    0b0101: (0, "lock", "lock inside the door"),
-    0b0110: (0, "childlock", "turn on child lock"),
-    0b0111: (1, "childlock", "turn off child lock"),
-    0b1000: (0, "lock", "lock outside the door"),
-    0b1111: (1, "lock", "abnormal"),
-}
-
-BLE_LOCK_METHOD = {
-    0b0000: "bluetooth",
-    0b0001: "password",
-    0b0010: "biometrics",
-    0b0011: "key",
-    0b0100: "turntable",
-    0b0101: "nfc",
-    0b0110: "one-time password",
-    0b0111: "two-step verification",
-    0b1001: "Homekit",
-    0b1000: "coercion",
-    0b1010: "manual",
-    0b1011: "automatic",
-    0b1111: "abnormal",
-}
 
 
 # Advertisement conversion of measurement data
@@ -176,37 +103,55 @@ def obj0006(
         key_id_bytes = xobj[0:4]
         match_byte = xobj[4]
         if key_id_bytes == b"\x00\x00\x00\x00":
-            key_id = "administrator"
+            key_type = "administrator"
         elif key_id_bytes == b"\xff\xff\xff\xff":
-            key_id = "unknown operator"
+            key_type = "unknown operator"
+        elif key_id_bytes == b"\xde\xad\xbe\xef":
+            key_type = "invalid operator"
         else:
-            key_id = str(int.from_bytes(key_id_bytes, "little"))
+            key_type = str(int.from_bytes(key_id_bytes, "little"))
         if match_byte == 0x00:
-            result = "match successful"
+            result = "match_successful"
         elif match_byte == 0x01:
-            result = "match failed"
+            result = "match_failed"
         elif match_byte == 0x02:
             result = "timeout"
         elif match_byte == 0x033:
-            result = "low quality (too light, fuzzy)"
+            result = "low_quality_too_light_fuzzy"
         elif match_byte == 0x04:
-            result = "insufficient area"
+            result = "insufficient_area"
         elif match_byte == 0x05:
-            result = "skin is too dry"
+            result = "skin_is_too_dry"
         elif match_byte == 0x06:
-            result = "skin is too wet"
+            result = "skin_is_too_wet"
         else:
             result = None
 
-        fingerprint = 1 if match_byte == 0x00 else 0
+        fingerprint = True if match_byte == 0x00 else False
 
-        return {
-            "fingerprint": fingerprint,
-            "result": result,
-            "key id": key_id,
-        }
-    else:
-        return {}
+        # Update fingerprint binary sensor
+        device.update_binary_sensor(
+            key=ExtendedBinarySensorDeviceClass.FINGERPRINT,
+            native_value=fingerprint,
+            device_class=ExtendedBinarySensorDeviceClass.FINGERPRINT,
+            name="Fingerprint",
+        )
+        # Update key_id sensor
+        device.update_sensor(
+            key=ExtendedSensorDeviceClass.KEY_ID,
+            name="Key id",
+            device_class=ExtendedSensorDeviceClass.KEY_ID,
+            native_value=key_type,
+            native_unit_of_measurement=None,
+        )
+        # Fire Fingerprint action event
+        if result:
+            device.fire_event(
+                key=EventDeviceKeys.FINGERPRINT,
+                event_type=result,
+                event_properties=None,
+            )
+    return {}
 
 
 def obj0007(
@@ -287,26 +232,33 @@ def obj0008(
     xobj: bytes, device: XiaomiBluetoothDeviceData, device_type: str
 ) -> dict[str, Any]:
     """armed away"""
-    return_data: dict[str, Any] = {}
     value = xobj[0] ^ 1
-    return_data.update({"armed away": value})
-    if len(xobj) == 5:
-        timestamp = datetime.datetime.utcfromtimestamp(
-            int.from_bytes(xobj[1:], "little")
-        ).isoformat()
-        return_data.update({"timestamp": timestamp})
+    device.update_binary_sensor(
+        key=ExtendedBinarySensorDeviceClass.ARMED,
+        native_value=bool(value),  # Armed away
+        device_class=ExtendedBinarySensorDeviceClass.ARMED,
+        name="Armed",
+    )
     # Lift up door handle outside the door sends this event from DSL-C08.
     if device_type == "DSL-C08":
-        return {
-            "lock": value,
-            "locktype": "lock",
-            "action": "lock outside the door",
-            "method": "manual",
-            "error": None,
-            "key id": None,
-            "timestamp": None,
-        }
-    return return_data
+        device.update_predefined_binary_sensor(
+            BinarySensorDeviceClass.LOCK, bool(value)
+        )
+        # Fire Lock action event
+        device.fire_event(
+            key=EventDeviceKeys.LOCK,
+            event_type="lock_outside_the_door",
+            event_properties=None,
+        )
+        # # Update method sensor
+        device.update_sensor(
+            key=ExtendedSensorDeviceClass.LOCK_METHOD,
+            name="Lock method",
+            device_class=ExtendedSensorDeviceClass.LOCK_METHOD,
+            native_value="manual",
+            native_unit_of_measurement=None,
+        )
+    return {}
 
 
 def obj0010(
@@ -314,15 +266,28 @@ def obj0010(
 ) -> dict[str, Any]:
     """Toothbrush"""
     if xobj[0] == 0:
-        if len(xobj) == 1:
-            return {"toothbrush": 1}
-        else:
-            return {"toothbrush": 1, "counter": xobj[1]}
+        device.update_binary_sensor(
+            key=ExtendedBinarySensorDeviceClass.TOOTHBRUSH,
+            native_value=True,  # Toothbrush On
+            device_class=ExtendedBinarySensorDeviceClass.TOOTHBRUSH,
+            name="Toothbrush",
+        )
     else:
-        if len(xobj) == 1:
-            return {"toothbrush": 0}
-        else:
-            return {"toothbrush": 0, "score": xobj[1]}
+        device.update_binary_sensor(
+            key=ExtendedBinarySensorDeviceClass.TOOTHBRUSH,
+            native_value=False,  # Toothbrush Off
+            device_class=ExtendedBinarySensorDeviceClass.TOOTHBRUSH,
+            name="Toothbrush",
+        )
+    if len(xobj) > 1:
+        device.update_sensor(
+            key=ExtendedSensorDeviceClass.COUNTER,
+            name="Counter",
+            native_unit_of_measurement=Units.TIME_SECONDS,
+            device_class=ExtendedSensorDeviceClass.COUNTER,
+            native_value=xobj[1],
+        )
+    return {}
 
 
 def obj000a(
@@ -343,48 +308,117 @@ def obj000b(
 ) -> dict[str, Any]:
     """Lock"""
     if len(xobj) == 9:
-        action_int = xobj[0] & 0x0F
-        method_int = xobj[0] >> 4
+        lock_action_int = xobj[0] & 0x0F
+        lock_method_int = xobj[0] >> 4
         key_id = int.from_bytes(xobj[1:5], "little")
+        short_key_id = key_id & 0xFFFF
 
-        timestamp = datetime.datetime.utcfromtimestamp(
-            int.from_bytes(xobj[5:], "little")
-        ).isoformat()
+        # Lock action (event) and lock method (sensor)
+        if (
+            lock_action_int not in BLE_LOCK_ACTION
+            or lock_method_int not in BLE_LOCK_METHOD
+        ):
+            return {}
+        lock_action = BLE_LOCK_ACTION[lock_action_int][2]
+        lock_method = BLE_LOCK_METHOD[lock_method_int]
 
-        # all keys except Bluetooth have only 65536 values
+        # Some specific key_ids represent an error
         error = BLE_LOCK_ERROR.get(key_id)
-        if error is None and method_int > 0:
-            key_id &= 0xFFFF
 
-        if action_int not in BLE_LOCK_ACTION or method_int not in BLE_LOCK_METHOD:
+        if not error:
+            if key_id == 0x00000000:
+                key_type = "administrator"
+            elif key_id == 0xFFFFFFFF:
+                key_type = "unknown operator"
+            elif key_id == 0xDEADBEEF:
+                key_type = "invalid operator"
+            elif key_id <= 0x7FFFFFF:
+                # Bluetooth (up to 2147483647)
+                key_type = f"Bluetooth key {key_id}"
+            else:
+                # All other key methods have only key ids up to 65536
+
+                if key_id <= 0x8001FFFF:
+                    key_type = f"Fingerprint key id {short_key_id}"
+                elif key_id <= 0x8002FFFF:
+                    key_type = f"Password key id {short_key_id}"
+                elif key_id <= 0x8003FFFF:
+                    key_type = f"Keys key id {short_key_id}"
+                elif key_id <= 0x8004FFFF:
+                    key_type = f"NFC key id {short_key_id}"
+                elif key_id <= 0x8005FFFF:
+                    key_type = f"Two-step verification key id {short_key_id}"
+                elif key_id <= 0x8006FFFF:
+                    key_type = f"Human face key id {short_key_id}"
+                elif key_id <= 0x8007FFFF:
+                    key_type = f"Finger veins key id {short_key_id}"
+                elif key_id <= 0x8008FFFF:
+                    key_type = f"Palm print key id {short_key_id}"
+                else:
+                    key_type = f"key id {short_key_id}"
+
+        # Lock type and state
+        # Lock type can be `lock` or for ZNMS17LM `lock`, `childlock` or `antilock`
+        if device_type == "ZNMS17LM":
+            # Lock type can be `lock`, `childlock` or `antilock`
+            lock_type = BLE_LOCK_ACTION[lock_action_int][1]
+        else:
+            # Lock type can only be `lock` for other locks
+            lock_type = "lock"
+        lock_state = BLE_LOCK_ACTION[lock_action_int][0]
+
+        # Update lock state
+        if lock_type == "lock":
+            device.update_predefined_binary_sensor(
+                BinarySensorDeviceClass.LOCK, lock_state
+            )
+        elif lock_type == "childlock":
+            device.update_binary_sensor(
+                key=ExtendedBinarySensorDeviceClass.CHILDLOCK,
+                native_value=lock_state,
+                device_class=ExtendedBinarySensorDeviceClass.CHILDLOCK,
+                name="Childlock",
+            )
+        elif lock_type == "antilock":
+            device.update_binary_sensor(
+                key=ExtendedBinarySensorDeviceClass.ANTILOCK,
+                native_value=lock_state,
+                device_class=ExtendedBinarySensorDeviceClass.ANTILOCK,
+                name="Antilock",
+            )
+        else:
             return {}
 
-        lock = BLE_LOCK_ACTION[action_int][0]
-        # Decouple lock by type on some devices
-        lock_type = "lock"
-        if device_type == "ZNMS17LM":
-            lock_type = BLE_LOCK_ACTION[action_int][1]
-
-        action = BLE_LOCK_ACTION[action_int][2]
-        method = BLE_LOCK_METHOD[method_int]
-
-        # Biometric unlock then disarm
-        if device_type == "DSL-C08":
-            if method == "password":
-                if 5000 <= key_id < 6000:
-                    method = "one-time password"
-
-        return {
-            lock_type: lock,
-            "locktype": lock_type,
-            "action": action,
-            "method": method,
-            "error": error,
-            "key id": hex(key_id),
-            "timestamp": timestamp,
-        }
-    else:
-        return {}
+        # Update key_id sensor
+        device.update_sensor(
+            key=ExtendedSensorDeviceClass.KEY_ID,
+            name="Key id",
+            device_class=ExtendedSensorDeviceClass.KEY_ID,
+            native_value=key_type,
+            native_unit_of_measurement=None,
+        )
+        # Fire Lock action event: see BLE_LOCK_ACTTION
+        device.fire_event(
+            key=EventDeviceKeys.LOCK,
+            event_type=lock_action,
+            event_properties=None,
+        )
+        # # Update method sensor: see BLE_LOCK_METHOD
+        device.update_sensor(
+            key=ExtendedSensorDeviceClass.LOCK_METHOD,
+            name="Lock method",
+            device_class=ExtendedSensorDeviceClass.LOCK_METHOD,
+            native_value=lock_method.value,
+            native_unit_of_measurement=None,
+        )
+        if error:
+            # Fire event with the error: see BLE_LOCK_ERROR
+            device.fire_event(
+                key=EventDeviceKeys.ERROR,
+                event_type=error,
+                event_properties=None,
+            )
+    return {}
 
 
 def obj000f(
@@ -410,173 +444,252 @@ def obj1001(
     xobj: bytes, device: XiaomiBluetoothDeviceData, device_type: str
 ) -> dict[str, Any]:
     """button"""
-    if len(xobj) == 3:
-        (button_type, value, press) = BUTTON_STRUCT.unpack(xobj)
-
-        # remote command and remote binary
-        remote_command = None
-        fan_remote_command = None
-        ven_fan_remote_command = None
-        bathroom_remote_command = None
-        one_btn_switch = None
-        two_btn_switch_left = None
-        two_btn_switch_right = None
-        three_btn_switch_left = None
-        three_btn_switch_middle = None
-        three_btn_switch_right = None
-        cube_direction = None
-        remote_binary = None
-
-        if button_type == 0:
-            remote_command = "on"
-            fan_remote_command = "fan toggle"
-            ven_fan_remote_command = "swing"
-            bathroom_remote_command = "stop"
-            one_btn_switch = "toggle"
-            two_btn_switch_left = "toggle"
-            three_btn_switch_left = "toggle"
-            cube_direction = "right"
-            remote_binary = 1
-        elif button_type == 1:
-            remote_command = "off"
-            fan_remote_command = "light toggle"
-            ven_fan_remote_command = "power toggle"
-            bathroom_remote_command = "air exchange"
-            two_btn_switch_right = "toggle"
-            three_btn_switch_middle = "toggle"
-            cube_direction = "left"
-            remote_binary = 0
-        elif button_type == 2:
-            remote_command = "sun"
-            fan_remote_command = "wind speed"
-            ven_fan_remote_command = "timer 60 minutes"
-            bathroom_remote_command = "fan"
-            two_btn_switch_left = "toggle"
-            two_btn_switch_right = "toggle"
-            three_btn_switch_right = "toggle"
-            remote_binary = None
-        elif button_type == 3:
-            remote_command = "+"
-            fan_remote_command = "color temperature"
-            ven_fan_remote_command = "strong wind speed"
-            bathroom_remote_command = "speed +"
-            three_btn_switch_left = "toggle"
-            three_btn_switch_middle = "toggle"
-            remote_binary = 1
-        elif button_type == 4:
-            remote_command = "m"
-            fan_remote_command = "wind mode"
-            ven_fan_remote_command = "timer 30 minutes"
-            bathroom_remote_command = "speed -"
-            three_btn_switch_middle = "toggle"
-            three_btn_switch_right = "toggle"
-            remote_binary = None
-        elif button_type == 5:
-            remote_command = "-"
-            fan_remote_command = "brightness"
-            ven_fan_remote_command = "low wind speed"
-            bathroom_remote_command = "dry"
-            three_btn_switch_left = "toggle"
-            three_btn_switch_right = "toggle"
-            remote_binary = 1
-        elif button_type == 6:
-            bathroom_remote_command = "light toggle"
-            three_btn_switch_left = "toggle"
-            three_btn_switch_middle = "toggle"
-            three_btn_switch_right = "toggle"
-        elif button_type == 7:
-            bathroom_remote_command = "swing"
-        elif button_type == 8:
-            bathroom_remote_command = "heat"
-
-        # press type and dimmer
-        button_press_type = "no press"
-        btn_switch_press_type = "no press"
-        dimmer = None
-
-        if press == 0:
-            button_press_type = "single press"
-            btn_switch_press_type = "single press"
-        elif press == 1:
-            button_press_type = "double press"
-            btn_switch_press_type = "long press"
-        elif press == 2:
-            button_press_type = "long press"
-            btn_switch_press_type = "double press"
-        elif press == 3:
-            if button_type == 0:
-                button_press_type = "short press"
-                dimmer = value
-            if button_type == 1:
-                button_press_type = "long press"
-                dimmer = value
-        elif press == 4:
-            if button_type == 0:
-                if value <= 127:
-                    button_press_type = "rotate right"
-                    dimmer = value
-                else:
-                    button_press_type = "rotate left"
-                    dimmer = 256 - value
-            elif button_type <= 127:
-                button_press_type = "rotate right (pressed)"
-                dimmer = button_type
-            else:
-                button_press_type = "rotate left (pressed)"
-                dimmer = 256 - button_type
-        elif press == 5:
-            button_press_type = "short press"
-        elif press == 6:
-            button_press_type = "long press"
-
-        # return device specific output
-        result: dict[str, Any] = {}
-        if device_type in ["RTCGQ02LM", "YLAI003", "JTYJGD03MI", "SJWS01LM"]:
-            result["button"] = button_press_type
-        elif device_type == "XMMF01JQD":
-            result["button"] = cube_direction
-        elif device_type == "YLYK01YL":
-            result["remote"] = remote_command
-            result["button"] = button_press_type
-            if remote_binary is not None:
-                if button_press_type == "single press":
-                    result["remote single press"] = remote_binary
-                else:
-                    result["remote long press"] = remote_binary
-        elif device_type == "YLYK01YL-FANRC":
-            result["fan remote"] = fan_remote_command
-            result["button"] = button_press_type
-        elif device_type == "YLYK01YL-VENFAN":
-            result["ventilator fan remote"] = ven_fan_remote_command
-            result["button"] = button_press_type
-        elif device_type == "YLYB01YL-BHFRC":
-            result["bathroom heater remote"] = bathroom_remote_command
-            result["button"] = button_press_type
-        elif device_type == "YLKG07YL/YLKG08YL":
-            result["dimmer"] = dimmer
-            result["button"] = button_press_type
-        elif device_type == "K9B-1BTN":
-            result["button switch"] = btn_switch_press_type
-            result["one btn switch"] = one_btn_switch
-        elif device_type == "K9B-2BTN":
-            result["button switch"] = btn_switch_press_type
-            if two_btn_switch_left:
-                result["two btn switch left"] = two_btn_switch_left
-            if two_btn_switch_right:
-                result["two btn switch right"] = two_btn_switch_right
-        elif device_type == "K9B-3BTN":
-            result["button switch"] = btn_switch_press_type
-            if three_btn_switch_left:
-                result["three btn switch left"] = three_btn_switch_left
-            if three_btn_switch_middle:
-                result["three btn switch middle"] = three_btn_switch_middle
-            if three_btn_switch_right:
-                result["three btn switch right"] = three_btn_switch_right
-
-        return result
-
-    else:
+    if len(xobj) != 3:
         return {}
+
+    (button_type, value, press_type) = BUTTON_STRUCT.unpack(xobj)
+
+    # button_type represents the pressed button or rubiks cube rotation direction
+    remote_command = None
+    fan_remote_command = None
+    ven_fan_remote_command = None
+    bathroom_remote_command = None
+    cube_rotation = None
+
+    one_btn_switch = False
+    two_btn_switch_left = False
+    two_btn_switch_right = False
+    three_btn_switch_left = False
+    three_btn_switch_middle = False
+    three_btn_switch_right = False
+
+    if button_type == 0:
+        remote_command = "on"
+        fan_remote_command = "fan"
+        ven_fan_remote_command = "swing"
+        bathroom_remote_command = "stop"
+        one_btn_switch = True
+        two_btn_switch_left = True
+        three_btn_switch_left = True
+        cube_rotation = "rotate_right"
+    elif button_type == 1:
+        remote_command = "off"
+        fan_remote_command = "light"
+        ven_fan_remote_command = "power"
+        bathroom_remote_command = "air_exchange"
+        two_btn_switch_right = True
+        three_btn_switch_middle = True
+        cube_rotation = "rotate_left"
+    elif button_type == 2:
+        remote_command = "brightness"
+        fan_remote_command = "wind_speed"
+        ven_fan_remote_command = "timer_60_minutes"
+        bathroom_remote_command = "fan"
+        two_btn_switch_left = True
+        two_btn_switch_right = True
+        three_btn_switch_right = True
+    elif button_type == 3:
+        remote_command = "plus"
+        fan_remote_command = "color_temperature"
+        ven_fan_remote_command = "increase_wind_speed"
+        bathroom_remote_command = "increase_speed"
+        three_btn_switch_left = True
+        three_btn_switch_middle = True
+    elif button_type == 4:
+        remote_command = "M"
+        fan_remote_command = "wind_mode"
+        ven_fan_remote_command = "timer_30_minutes"
+        bathroom_remote_command = "decrease_speed"
+        three_btn_switch_middle = True
+        three_btn_switch_right = True
+    elif button_type == 5:
+        remote_command = "min"
+        fan_remote_command = "brightness"
+        ven_fan_remote_command = "decrease_wind_speed"
+        bathroom_remote_command = "dry"
+        three_btn_switch_left = True
+        three_btn_switch_right = True
+    elif button_type == 6:
+        bathroom_remote_command = "light"
+        three_btn_switch_left = True
+        three_btn_switch_middle = True
+        three_btn_switch_right = True
+    elif button_type == 7:
+        bathroom_remote_command = "swing"
+    elif button_type == 8:
+        bathroom_remote_command = "heat"
+
+    # press_type represents the type of press or rotate
+    # for dimmers, buton_type is used to represent the type of press
+    # for dimmers, value or button_type is used to represent the direction and number
+    # of steps, number of presses or duration of long press
+    button_press_type = "no_press"
+    btn_switch_press_type = None
+    dimmer_value: int = 0
+
+    if press_type == 0:
+        button_press_type = "press"
+        btn_switch_press_type = "press"
+    elif press_type == 1:
+        button_press_type = "double_press"
+        btn_switch_press_type = "long_press"
+    elif press_type == 2:
+        button_press_type = "long_press"
+        btn_switch_press_type = "double_press"
+    elif press_type == 3:
+        if button_type == 0:
+            button_press_type = "press"
+            dimmer_value = value
+        if button_type == 1:
+            button_press_type = "long_press"
+            dimmer_value = value
+    elif press_type == 4:
+        if button_type == 0:
+            if value <= 127:
+                button_press_type = "rotate_right"
+                dimmer_value = value
+            else:
+                button_press_type = "rotate_left"
+                dimmer_value = 256 - value
+        elif button_type <= 127:
+            button_press_type = "rotate_right_pressed"
+            dimmer_value = button_type
+        else:
+            button_press_type = "rotate_left_pressed"
+            dimmer_value = 256 - button_type
+    elif press_type == 5:
+        button_press_type = "press"
+    elif press_type == 6:
+        button_press_type = "long_press"
+
+    # return device specific output
+    if device_type in ["RTCGQ02LM", "YLAI003", "JTYJGD03MI", "SJWS01LM"]:
+        # RTCGQ02LM, JTYJGD03MI, SJWS01LM: press
+        # YLAI003: press, double_press or long_press
+        device.fire_event(
+            key=EventDeviceKeys.BUTTON,
+            event_type=button_press_type,
+            event_properties=None,
+        )
+    elif device_type == "XMMF01JQD":
+        # cube_rotation: rotate_left or rotate_right
+        device.fire_event(
+            key=EventDeviceKeys.CUBE,
+            event_type=cube_rotation,
+            event_properties=None,
+        )
+    elif device_type == "YLYK01YL":
+        # Buttons: on, off, brightness, plus, min, M
+        # Press types: press and long_press
+        if remote_command == "on":
+            device.update_predefined_binary_sensor(BinarySensorDeviceClass.POWER, True)
+        elif remote_command == "off":
+            device.update_predefined_binary_sensor(BinarySensorDeviceClass.POWER, False)
+        device.fire_event(
+            key=f"{str(EventDeviceKeys.BUTTON)}_{remote_command}",
+            event_type=button_press_type,
+            event_properties=None,
+        )
+    elif device_type == "YLYK01YL-FANRC":
+        # Buttons: fan, light, wind_speed, wind_mode, brightness, color_temperature
+        # Press types: press and long_press
+        device.fire_event(
+            key=f"{str(EventDeviceKeys.BUTTON)}_{fan_remote_command}",
+            event_type=button_press_type,
+            event_properties=None,
+        )
+    elif device_type == "YLYK01YL-VENFAN":
+        # Buttons: swing, power, timer_30_minutes, timer_60_minutes,
+        # increase_wind_speed, decrease_wind_speed
+        # Press types: press and long_press
+        device.fire_event(
+            key=f"{str(EventDeviceKeys.BUTTON)}_{ven_fan_remote_command}",
+            event_type=button_press_type,
+            event_properties=None,
+        )
+    elif device_type == "YLYB01YL-BHFRC":
+        # Buttons: heat, air_exchange, dry, fan, swing, decrease_speed, increase_speed,
+        # stop or light
+        # Press types: press and long_press
+        device.fire_event(
+            key=f"{str(EventDeviceKeys.BUTTON)}_{bathroom_remote_command}",
+            event_type=button_press_type,
+            event_properties=None,
+        )
+    elif device_type == "YLKG07YL/YLKG08YL":
+        # Dimmer reports: press, long_press, rotate_left, rotate_right,
+        # rotate_left_pressed  or rotate_right_pressed
+        if button_press_type == "press":
+            # it also reports how many times you pressed the dimmer.
+            event_property = "number_of_presses"
+        elif button_press_type == "long_press":
+            # it also reports the duration (in seconds) you pressed the dimmer
+            event_property = "duration"
+        elif button_press_type in [
+            "rotate_right",
+            "rotate_left",
+            "rotate_right_pressed",
+            "rotate_left_pressed",
+        ]:
+            # it reports how far you rotate, measured in number of `steps`.
+            event_property = "steps"
+        else:
+            event_property = None
+        event_properties = parse_event_properties(
+            event_property=event_property, value=dimmer_value
+        )
+        device.fire_event(
+            key=EventDeviceKeys.DIMMER,
+            event_type=button_press_type,
+            event_properties=event_properties,
+        )
+    elif device_type == "K9B-1BTN":
+        # Press types: press, double_press, long_press
+        if one_btn_switch:
+            device.fire_event(
+                key=EventDeviceKeys.BUTTON,
+                event_type=btn_switch_press_type,
+                event_properties=None,
+            )
+    elif device_type == "K9B-2BTN":
+        # Buttons: left and/or right
+        # Press types: press, double_press, long_press
+        # device can send button press of multiple buttons in one message
+        if two_btn_switch_left:
+            device.fire_event(
+                key=f"{str(EventDeviceKeys.BUTTON)}_left",
+                event_type=btn_switch_press_type,
+                event_properties=None,
+            )
+        if two_btn_switch_right:
+            device.fire_event(
+                key=f"{str(EventDeviceKeys.BUTTON)}_right",
+                event_type=btn_switch_press_type,
+                event_properties=None,
+            )
+    elif device_type == "K9B-3BTN":
+        # Buttons: left, middle and/or right
+        # result can be press, double_press or long_press
+        # device can send button press of multiple buttons in one message
+        if three_btn_switch_left:
+            device.fire_event(
+                key=f"{str(EventDeviceKeys.BUTTON)}_left",
+                event_type=btn_switch_press_type,
+                event_properties=None,
+            )
+        if three_btn_switch_middle:
+            device.fire_event(
+                key=f"{str(EventDeviceKeys.BUTTON)}_middle",
+                event_type=btn_switch_press_type,
+                event_properties=None,
+            )
+        if three_btn_switch_right:
+            device.fire_event(
+                key=f"{str(EventDeviceKeys.BUTTON)}_right",
+                event_type=btn_switch_press_type,
+                event_properties=None,
+            )
+    return {}
 
 
 def obj1004(
@@ -592,9 +705,10 @@ def obj1004(
 def obj1005(
     xobj: bytes, device: XiaomiBluetoothDeviceData, device_type: str
 ) -> dict[str, Any]:
-    """Switch and Temperature"""
+    """Power on/off and Temperature"""
+    device.update_predefined_binary_sensor(BinarySensorDeviceClass.POWER, xobj[0])
     device.update_predefined_sensor(SensorLibrary.TEMPERATURE__CELSIUS, xobj[1])
-    return {"switch": xobj[0]}
+    return {}
 
 
 def obj1006(
@@ -603,7 +717,18 @@ def obj1006(
     """Humidity"""
     if len(xobj) == 2:
         (humi,) = H_STRUCT.unpack(xobj)
-        device.update_predefined_sensor(SensorLibrary.HUMIDITY__PERCENTAGE, humi / 10)
+        if device_type in ["LYWSD03MMC", "MHO-C401"]:
+            # To handle jagged stair stepping readings from these sensors.
+            # https://github.com/custom-components/ble_monitor/blob/ef2e3944b9c1a635208390b8563710d0eec2a945/custom_components/ble_monitor/sensor.py#L752
+            # https://github.com/esphome/esphome/blob/c39f6d0738d97ecc11238220b493731ec70c701c/esphome/components/xiaomi_lywsd03mmc/xiaomi_lywsd03mmc.cpp#L44C14-L44C99
+            # https://github.com/custom-components/ble_monitor/issues/7#issuecomment-595948254
+            device.update_predefined_sensor(
+                SensorLibrary.HUMIDITY__PERCENTAGE, int(humi / 10)
+            )
+        else:
+            device.update_predefined_sensor(
+                SensorLibrary.HUMIDITY__PERCENTAGE, humi / 10
+            )
     return {}
 
 
@@ -659,8 +784,9 @@ def obj1010(
 def obj1012(
     xobj: bytes, device: XiaomiBluetoothDeviceData, device_type: str
 ) -> dict[str, Any]:
-    """Switch"""
-    return {"switch": xobj[0]}
+    """Power on/off"""
+    device.update_predefined_binary_sensor(BinarySensorDeviceClass.POWER, xobj[0])
+    return {}
 
 
 def obj1013(
@@ -668,9 +794,10 @@ def obj1013(
 ) -> dict[str, Any]:
     """Consumable (in percent)"""
     device.update_sensor(
-        key="consumable",
+        key=ExtendedSensorDeviceClass.CONSUMABLE,
         name="Consumable",
         native_unit_of_measurement=Units.PERCENTAGE,
+        device_class=ExtendedSensorDeviceClass.CONSUMABLE,
         native_value=xobj[0],
     )
     return {}
@@ -788,9 +915,16 @@ def obj100e(
         # Unlock by type on some devices
         if device_type == "DSL-C08":
             lock_attribute = int.from_bytes(xobj, "little")
-            lock = lock_attribute & 0x01 ^ 1
-            childlock = lock_attribute >> 3 ^ 1
-            return {"childlock": childlock, "lock": lock}
+
+            device.update_predefined_binary_sensor(
+                BinarySensorDeviceClass.LOCK, bool(lock_attribute & 0x01 ^ 1)
+            )
+            device.update_binary_sensor(
+                key=ExtendedBinarySensorDeviceClass.CHILDLOCK,
+                native_value=bool(lock_attribute >> 3 ^ 1),
+                device_class=ExtendedBinarySensorDeviceClass.CHILDLOCK,
+                name="Childlock",
+            )
     return {}
 
 
@@ -819,13 +953,55 @@ def obj2000(
         )
         device.update_predefined_sensor(SensorLibrary.TEMPERATURE__CELSIUS, body_temp)
         device.update_predefined_sensor(SensorLibrary.BATTERY__PERCENTAGE, bat)
-
     return {}
 
 
+def obj3003(
+    xobj: bytes, device: XiaomiBluetoothDeviceData, device_type: str
+) -> dict[str, Any]:
+    """Brushing"""
+    result = {}
+    start_obj = xobj[0]
+    if start_obj == 0:
+        # Start of brushing
+        device.update_binary_sensor(
+            key=ExtendedBinarySensorDeviceClass.TOOTHBRUSH,
+            native_value=True,  # Toothbrush On
+            device_class=ExtendedBinarySensorDeviceClass.TOOTHBRUSH,
+            name="Toothbrush",
+        )
+        # Start time has not been implemented
+        start_time = struct.unpack("<L", xobj[1:5])[0]
+        result["start time"] = datetime.datetime.fromtimestamp(
+            start_time, tz=datetime.timezone.utc
+        ).replace(tzinfo=None)
+    elif start_obj == 1:
+        # End of brushing
+        device.update_binary_sensor(
+            key=ExtendedBinarySensorDeviceClass.TOOTHBRUSH,
+            native_value=False,  # Toothbrush Off
+            device_class=ExtendedBinarySensorDeviceClass.TOOTHBRUSH,
+            name="Toothbrush",
+        )
+        # End time has not been implemented
+        end_time = struct.unpack("<L", xobj[1:5])[0]
+        result["end time"] = datetime.datetime.fromtimestamp(
+            end_time, tz=datetime.timezone.utc
+        ).replace(tzinfo=None)
+    if len(xobj) == 6:
+        device.update_sensor(
+            key=ExtendedSensorDeviceClass.SCORE,
+            name="Score",
+            native_unit_of_measurement=None,
+            device_class=ExtendedSensorDeviceClass.SCORE,
+            native_value=xobj[5],
+        )
+    return result
+
+
 # The following data objects are device specific. For now only added for
-# LYWSD02MMC, MJWSD05MMC, XMWSDJ04MMC, XMWXKG01YL, LINPTECH MS1BB(MI), HS1BB(MI), K9BB
-# https://miot-spec.org/miot-spec-v2/instances?status=all
+# LYWSD02MMC, MJWSD05MMC, XMWSDJ04MMC, XMWXKG01YL, LINPTECH MS1BB(MI), HS1BB(MI),
+# K9BB, PTX https://miot-spec.org/miot-spec-v2/instances?status=all
 def obj4803(
     xobj: bytes, device: XiaomiBluetoothDeviceData, device_type: str
 ) -> dict[str, Any]:
@@ -891,8 +1067,8 @@ def obj4a01(
     xobj: bytes, device: XiaomiBluetoothDeviceData, device_type: str
 ) -> dict[str, Any]:
     """Low Battery"""
-    low_batt = xobj[0]
-    return {"low battery": low_batt}
+    device.update_predefined_binary_sensor(BinarySensorDeviceClass.BATTERY, xobj[0])
+    return {}
 
 
 def obj4a08(
@@ -902,6 +1078,42 @@ def obj4a08(
     (illum,) = struct.unpack("f", xobj)
     device.update_predefined_binary_sensor(BinarySensorDeviceClass.MOTION, True)
     device.update_predefined_sensor(SensorLibrary.LIGHT__LIGHT_LUX, illum)
+    return {}
+
+
+def obj4a0c(
+    xobj: bytes, device: XiaomiBluetoothDeviceData, device_type: str
+) -> dict[str, Any]:
+    """Single press"""
+    device.fire_event(
+        key=EventDeviceKeys.BUTTON,
+        event_type="press",
+        event_properties=None,
+    )
+    return {}
+
+
+def obj4a0d(
+    xobj: bytes, device: XiaomiBluetoothDeviceData, device_type: str
+) -> dict[str, Any]:
+    """Double press"""
+    device.fire_event(
+        key=EventDeviceKeys.BUTTON,
+        event_type="double_press",
+        event_properties=None,
+    )
+    return {}
+
+
+def obj4a0e(
+    xobj: bytes, device: XiaomiBluetoothDeviceData, device_type: str
+) -> dict[str, Any]:
+    """Long press"""
+    device.fire_event(
+        key=EventDeviceKeys.BUTTON,
+        event_type="long_press",
+        event_properties=None,
+    )
     return {}
 
 
@@ -949,10 +1161,14 @@ def obj4a12(
 def obj4a13(
     xobj: bytes, device: XiaomiBluetoothDeviceData, device_type: str
 ) -> dict[str, Any]:
-    """Button"""
-    click = xobj[0]
-    if click == 1:
-        return {"button": "toggle"}
+    """Button press (MS1BB(MI))"""
+    press = xobj[0]
+    if press == 1:
+        device.fire_event(
+            key=EventDeviceKeys.BUTTON,
+            event_type="press",
+            event_properties=None,
+        )
     return {}
 
 
@@ -1019,116 +1235,155 @@ def obj4c14(
     return {"mode": mode}
 
 
+def obj4e01(
+    xobj: bytes, device: XiaomiBluetoothDeviceData, device_type: str
+) -> dict[str, Any]:
+    """Low Battery"""
+    device.update_predefined_binary_sensor(BinarySensorDeviceClass.BATTERY, xobj[0])
+    return {}
+
+
 def obj4e0c(
     xobj: bytes, device: XiaomiBluetoothDeviceData, device_type: str
 ) -> dict[str, Any]:
-    """Click"""
-    result: dict[str, Any] = {}
-
-    click = xobj[0]
+    """Button press"""
     if device_type == "XMWXKG01YL":
-        if click == 1:
-            result = {
-                "two btn switch left": "toggle",
-                "button switch": "single press",
-            }
-        elif click == 2:
-            result = {
-                "two btn switch right": "toggle",
-                "button switch": "single press",
-            }
-        elif click == 3:
-            result = {
-                "two btn switch left": "toggle",
-                "two btn switch right": "toggle",
-                "button switch": "single press",
-            }
+        press = xobj[0]
+        if press == 1:
+            # left button
+            device.fire_event(
+                key=f"{str(EventDeviceKeys.BUTTON)}_left",
+                event_type="press",
+                event_properties=None,
+            )
+        elif press == 2:
+            # right button
+            device.fire_event(
+                key=f"{str(EventDeviceKeys.BUTTON)}_right",
+                event_type="press",
+                event_properties=None,
+            )
+        elif press == 3:
+            # both left and right button
+            device.fire_event(
+                key=f"{str(EventDeviceKeys.BUTTON)}_left",
+                event_type="press",
+                event_properties=None,
+            )
+            device.fire_event(
+                key=f"{str(EventDeviceKeys.BUTTON)}_right",
+                event_type="press",
+                event_properties=None,
+            )
     elif device_type == "K9BB-1BTN":
-        if click == 1:
-            result = {
-                "one btn switch": "toggle",
-                "button switch": "single press",
-            }
-        elif click == 8:
-            result = {
-                "one btn switch": "toggle",
-                "button switch": "long press",
-            }
-        elif click == 15:
-            result = {
-                "one btn switch": "toggle",
-                "button switch": "double press",
-            }
+        press = xobj[0]
+        if press == 1:
+            device.fire_event(
+                key=EventDeviceKeys.BUTTON,
+                event_type="press",
+                event_properties=None,
+            )
+        elif press == 8:
+            device.fire_event(
+                key=EventDeviceKeys.BUTTON,
+                event_type="long_press",
+                event_properties=None,
+            )
+        elif press == 15:
+            device.fire_event(
+                key=EventDeviceKeys.BUTTON,
+                event_type="double_press",
+                event_properties=None,
+            )
     elif device_type == "XMWXKG01LM":
-        result = {
-            "one btn switch": "toggle",
-            "button switch": "single press",
-        }
-    return result
+        device.fire_event(
+            key=EventDeviceKeys.BUTTON,
+            event_type="press",
+            event_properties=None,
+        )
+    return {}
 
 
 def obj4e0d(
     xobj: bytes, device: XiaomiBluetoothDeviceData, device_type: str
 ) -> dict[str, Any]:
-    """Double Click"""
-    result: dict[str, Any] = {}
-
-    click = xobj[0]
+    """Double Press"""
     if device_type == "XMWXKG01YL":
-        if click == 1:
-            result = {
-                "two btn switch left": "toggle",
-                "button switch": "double press",
-            }
-        elif click == 2:
-            result = {
-                "two btn switch right": "toggle",
-                "button switch": "double press",
-            }
-        elif click == 3:
-            result = {
-                "two btn switch left": "toggle",
-                "two btn switch right": "toggle",
-                "button switch": "double press",
-            }
+        press = xobj[0]
+        if press == 1:
+            # left button
+            device.fire_event(
+                key=f"{str(EventDeviceKeys.BUTTON)}_left",
+                event_type="double_press",
+                event_properties=None,
+            )
+        elif press == 2:
+            # right button
+            device.fire_event(
+                key=f"{str(EventDeviceKeys.BUTTON)}_right",
+                event_type="double_press",
+                event_properties=None,
+            )
+        elif press == 3:
+            # both left and right button
+            device.fire_event(
+                key=f"{str(EventDeviceKeys.BUTTON)}_left",
+                event_type="double_press",
+                event_properties=None,
+            )
+            device.fire_event(
+                key=f"{str(EventDeviceKeys.BUTTON)}_right",
+                event_type="double_press",
+                event_properties=None,
+            )
     elif device_type == "XMWXKG01LM":
-        result = {
-            "one btn switch": "toggle",
-            "button switch": "double press",
-        }
-    return result
+        device.fire_event(
+            key=EventDeviceKeys.BUTTON,
+            event_type="double_press",
+            event_properties=None,
+        )
+    return {}
 
 
 def obj4e0e(
     xobj: bytes, device: XiaomiBluetoothDeviceData, device_type: str
 ) -> dict[str, Any]:
     """Long Press"""
-    result: dict[str, Any] = {}
-
-    click = xobj[0]
     if device_type == "XMWXKG01YL":
-        if click == 1:
-            result = {
-                "two btn switch left": "toggle",
-                "button switch": "long press",
-            }
-        elif click == 2:
-            result = {
-                "two btn switch right": "toggle",
-                "button switch": "long press",
-            }
-        elif click == 3:
-            result = {
-                "two btn switch left": "toggle",
-                "two btn switch right": "toggle",
-                "button switch": "long press",
-            }
+        press = xobj[0]
+        if press == 1:
+            # left button
+            device.fire_event(
+                key=f"{str(EventDeviceKeys.BUTTON)}_left",
+                event_type="long_press",
+                event_properties=None,
+            )
+        elif press == 2:
+            # right button
+            device.fire_event(
+                key=f"{str(EventDeviceKeys.BUTTON)}_right",
+                event_type="long_press",
+                event_properties=None,
+            )
+        elif press == 3:
+            # both left and right button
+            device.fire_event(
+                key=f"{str(EventDeviceKeys.BUTTON)}_left",
+                event_type="long_press",
+                event_properties=None,
+            )
+            device.fire_event(
+                key=f"{str(EventDeviceKeys.BUTTON)}_right",
+                event_type="long_press",
+                event_properties=None,
+            )
     elif device_type == "XMWXKG01LM":
-        result = {
-            "one btn switch": "toggle",
-            "button switch": "long press",
-        }
-    return result
+        device.fire_event(
+            key=EventDeviceKeys.BUTTON,
+            event_type="long_press",
+            event_properties=None,
+        )
+    return {}
 
 
 def obj4e1c(
@@ -1169,12 +1424,16 @@ xiaomi_dataobject_dict = {
     0x100E: obj100e,
     0x101B: obj101b,
     0x2000: obj2000,
+    0x3003: obj3003,
     0x4803: obj4803,
     0x4804: obj4804,
     0x4805: obj4805,
     0x4818: obj4818,
     0x4A01: obj4a01,
     0x4A08: obj4a08,
+    0x4A0C: obj4a0c,
+    0x4A0D: obj4a0d,
+    0x4A0E: obj4a0e,
     0x4A0F: obj4a0f,
     0x4A12: obj4a12,
     0x4A13: obj4a13,
@@ -1184,6 +1443,7 @@ xiaomi_dataobject_dict = {
     0x4C03: obj4c03,
     0x4C08: obj4c08,
     0x4C14: obj4c14,
+    0x4E01: obj4e01,
     0x4E1C: obj4e1c,
     0x4E0C: obj4e0c,
     0x4E0D: obj4e0d,
@@ -1211,7 +1471,7 @@ class XiaomiBluetoothDeviceData(BluetoothData):
 
     def __init__(self, bindkey: bytes | None = None) -> None:
         super().__init__()
-        self.bindkey = bindkey
+        self.set_bindkey(bindkey)
 
         # Data that we know how to parse but don't yet map to the SensorData model.
         self.unhandled: dict[str, Any] = {}
@@ -1219,11 +1479,6 @@ class XiaomiBluetoothDeviceData(BluetoothData):
         # The type of encryption to expect, based on flags in the bluetooth
         # frame.
         self.encryption_scheme = EncryptionScheme.NONE
-
-        # If true, then we know the actual MAC of the device.
-        # On macOS, we don't unless the device includes it in the advertisement
-        # (CoreBluetooth uses UUID's generated by CoreBluetooth instead of the MAC)
-        self.mac_known = sys.platform != "darwin"
 
         # If true then we have used the provided encryption key to decrypt at least
         # one payload.
@@ -1240,22 +1495,27 @@ class XiaomiBluetoothDeviceData(BluetoothData):
         # value with a new bindkey.
         self.last_service_info: BluetoothServiceInfo | None = None
 
+        # If this is True, the device is not sending advertisements
+        # in a regular interval
+        self.sleepy_device = False
+
+    def set_bindkey(self, bindkey: bytes | None) -> None:
+        """Set the bindkey."""
+        if bindkey:
+            if len(bindkey) == 12:
+                # MiBeacon v2/v3 bindkey (requires 4 additional (fixed) bytes)
+                bindkey = b"".join(
+                    [bindkey[0:6], bytes.fromhex("8d3d3c97"), bindkey[6:]]
+                )
+            elif len(bindkey) == 16:
+                self.cipher: AESCCM | None = AESCCM(bindkey, tag_length=4)
+        else:
+            self.cipher = None
+        self.bindkey = bindkey
+
     def supported(self, data: BluetoothServiceInfo) -> bool:
         if not super().supported(data):
             return False
-
-        # Where a device uses encryption we need to known its actual MAC address.
-        # As the encryption uses it as part of the nonce.
-        # On macOS we instead only know its CoreBluetooth UUID.
-        # It seems its impossible to automatically get that in the general case.
-        # So devices do duplicate the MAC in the advertisement, we use that
-        # when we can on macOS.
-        # We may want to ask the user for the MAC address during config flow
-        # For now, just hide these devices for macOS users.
-        if self.encryption_scheme != EncryptionScheme.NONE:
-            if not self.mac_known:
-                return False
-
         return True
 
     def _start_update(self, service_info: BluetoothServiceInfo) -> None:
@@ -1268,6 +1528,12 @@ class XiaomiBluetoothDeviceData(BluetoothData):
                     self.last_service_info = service_info
             elif uuid == SERVICE_HHCCJCY10:
                 if self._parse_hhcc(service_info, data):
+                    self.last_service_info = service_info
+            elif uuid == SERVICE_SCALE1:
+                if self._parse_scale_v1(service_info, data):
+                    self.last_service_info = service_info
+            elif uuid == SERVICE_SCALE2:
+                if self._parse_scale_v2(service_info, data):
                     self.last_service_info = service_info
 
     def _parse_hhcc(self, service_info: BluetoothServiceInfo, data: bytes) -> bool:
@@ -1309,10 +1575,6 @@ class XiaomiBluetoothDeviceData(BluetoothData):
             return False
 
         mac_readable = service_info.address
-        if len(mac_readable) != 17 and mac_readable[2] != ":":
-            # On macOS we get a UUID, which is useless for MiBeacons
-            mac_readable = "00:00:00:00:00:00"
-
         source_mac = bytes.fromhex(mac_readable.replace(":", ""))
 
         # extract frame control bits
@@ -1352,14 +1614,13 @@ class XiaomiBluetoothDeviceData(BluetoothData):
                 return False
             xiaomi_mac_reversed = data[5:11]
             xiaomi_mac = xiaomi_mac_reversed[::-1]
-            if sys.platform != "darwin" and xiaomi_mac != source_mac:
+            if xiaomi_mac != source_mac:
                 _LOGGER.debug(
                     "MAC address doesn't match data frame. Expected: %s, Got: %s)",
                     to_mac(xiaomi_mac),
                     to_mac(source_mac),
                 )
                 return False
-            self.mac_known = True
         else:
             xiaomi_mac = source_mac
 
@@ -1380,6 +1641,9 @@ class XiaomiBluetoothDeviceData(BluetoothData):
 
         self.device_id = device_id
         self.device_type = device_type
+
+        # set to True if the device is not sending regular BLE advertisements
+        self.sleepy_device = device_type in SLEEPY_DEVICE_MODELS
 
         packet_id = data[4]
 
@@ -1485,7 +1749,12 @@ class XiaomiBluetoothDeviceData(BluetoothData):
                     break
                 this_start = payload_start + 3
                 dobject = payload[this_start:next_start]
-                if obj_length != 0:
+                if (
+                    dobject
+                    and obj_length != 0
+                    or hex(obj_typecode)
+                    in ["0x4a0c", "0x4a0d", "0x4a0e", "0x4e0c", "0x4e0d", "0x4e0e"]
+                ):
                     resfunc = xiaomi_dataobject_dict.get(obj_typecode, None)
                     if resfunc:
                         self.unhandled.update(resfunc(dobject, self, device_type))
@@ -1496,6 +1765,100 @@ class XiaomiBluetoothDeviceData(BluetoothData):
                             data.hex(),
                         )
                 payload_start = next_start
+
+        return True
+
+    def _parse_scale_v1(self, service_info: BluetoothServiceInfo, data: bytes) -> bool:
+        if len(data) != 10:
+            return False
+
+        uuid16 = (data[3] << 8) | data[2]
+
+        identifier = short_address(service_info.address)
+
+        self.device_id = uuid16
+        self.set_title(f"Mi Smart Scale ({identifier})")
+        self.set_device_name(f"Mi Smart Scale ({identifier})")
+        self.set_device_type("XMTZC01HM/XMTZC04HM")
+        self.set_device_manufacturer("Xiaomi")
+        self.pending = False
+        self.sleepy_device = True
+
+        control_byte = data[0]
+        mass = float(int.from_bytes(data[1:3], byteorder="little"))
+
+        mass_in_pounds = bool(int(control_byte & (1 << 0)))
+        mass_in_catty = bool(int(control_byte & (1 << 4)))
+        mass_in_kilograms = not mass_in_catty and not mass_in_pounds
+        mass_stabilized = bool(int(control_byte & (1 << 5)))
+        mass_removed = bool(int(control_byte & (1 << 7)))
+
+        if mass_in_kilograms:
+            # sensor advertises kg * 200
+            mass /= 200
+        elif mass_in_pounds:
+            # sensor advertises lbs * 100, conversion to kg (1 lbs = 0.45359237 kg)
+            mass *= 0.0045359237
+        else:
+            # sensor advertises catty * 100, conversion to kg (1 catty = 0.5 kg)
+            mass *= 0.005
+
+        self.update_predefined_sensor(
+            SensorLibrary.MASS_NON_STABILIZED__MASS_KILOGRAMS, mass
+        )
+        if mass_stabilized and not mass_removed:
+            self.update_predefined_sensor(SensorLibrary.MASS__MASS_KILOGRAMS, mass)
+
+        return True
+
+    def _parse_scale_v2(self, service_info: BluetoothServiceInfo, data: bytes) -> bool:
+        if len(data) != 13:
+            return False
+
+        uuid16 = (data[3] << 8) | data[2]
+
+        identifier = short_address(service_info.address)
+
+        self.device_id = uuid16
+        self.set_title(f"Mi Body Composition Scale ({identifier})")
+        self.set_device_name(f"Mi Body Composition Scale ({identifier})")
+        self.set_device_type("XMTZC02HM/XMTZC05HM/NUN4049CN")
+        self.set_device_manufacturer("Xiaomi")
+        self.pending = False
+        self.sleepy_device = True
+
+        control_bytes = data[:2]
+        # skip bytes containing date and time
+        impedance = int.from_bytes(data[9:11], byteorder="little")
+        mass = float(int.from_bytes(data[11:13], byteorder="little"))
+
+        # Decode control bytes
+        control_flags = "".join([bin(byte)[2:].zfill(8) for byte in control_bytes])
+
+        mass_in_pounds = bool(int(control_flags[7]))
+        mass_in_catty = bool(int(control_flags[9]))
+        mass_in_kilograms = not mass_in_catty and not mass_in_pounds
+        mass_stabilized = bool(int(control_flags[10]))
+        mass_removed = bool(int(control_flags[8]))
+        impedance_stabilized = bool(int(control_flags[14]))
+
+        if mass_in_kilograms:
+            # sensor advertises kg * 200
+            mass /= 200
+        elif mass_in_pounds:
+            # sensor advertises lbs * 100, conversion to kg (1 lbs = 0.45359237 kg)
+            mass *= 0.0045359237
+        else:
+            # sensor advertises catty * 100, conversion to kg (1 catty = 0.5 kg)
+            mass *= 0.005
+
+        self.update_predefined_sensor(
+            SensorLibrary.MASS_NON_STABILIZED__MASS_KILOGRAMS, mass
+        )
+        if mass_stabilized and not mass_removed:
+            self.update_predefined_sensor(SensorLibrary.MASS__MASS_KILOGRAMS, mass)
+            if impedance_stabilized:
+                self.update_predefined_sensor(SensorLibrary.IMPEDANCE__OHM, impedance)
 
         return True
 
@@ -1519,20 +1882,22 @@ class XiaomiBluetoothDeviceData(BluetoothData):
             return None
 
         nonce = b"".join([xiaomi_mac[::-1], data[2:5], data[-7:-4]])
-        aad = b"\x11"
-        token = data[-4:]
-        cipherpayload = data[i:-7]
-        cipher = AES.new(self.bindkey, AES.MODE_CCM, nonce=nonce, mac_len=4)
-        cipher.update(aad)
+        associated_data = b"\x11"
+        mic = data[-4:]
+        encrypted_payload = data[i:-7]
 
+        assert self.cipher is not None  # nosec
+        # decrypt the data
         try:
-            decrypted_payload = cipher.decrypt_and_verify(cipherpayload, token)
-        except ValueError as error:
+            decrypted_payload = self.cipher.decrypt(
+                nonce, encrypted_payload + mic, associated_data
+            )
+        except InvalidTag as error:
             self.bindkey_verified = False
             _LOGGER.warning("Decryption failed: %s", error)
-            _LOGGER.debug("token: %s", token.hex())
+            _LOGGER.debug("mic: %s", mic.hex())
             _LOGGER.debug("nonce: %s", nonce.hex())
-            _LOGGER.debug("cipherpayload: %s", cipherpayload.hex())
+            _LOGGER.debug("encrypted payload: %s", encrypted_payload.hex())
             return None
         if decrypted_payload is None:
             self.bindkey_verified = False
@@ -1558,26 +1923,28 @@ class XiaomiBluetoothDeviceData(BluetoothData):
             _LOGGER.debug("Encryption key not set and adv is encrypted")
             return None
 
-        if len(self.bindkey) != 12:
+        if len(self.bindkey) != 16:
             self.bindkey_verified = False
             _LOGGER.error("Encryption key should be 12 bytes (24 characters) long")
             return None
 
-        key = b"".join([self.bindkey[0:6], bytes.fromhex("8d3d3c97"), self.bindkey[6:]])
-
         nonce = b"".join([data[0:5], data[-4:-1], xiaomi_mac[::-1][:-1]])
-        aad = b"\x11"
-        cipherpayload = data[i:-4]
-        cipher = AES.new(key, AES.MODE_CCM, nonce=nonce, mac_len=4)
-        cipher.update(aad)
+        encrypted_payload = data[i:-4]
+        # cryptography can't decrypt a message without authentication
+        # so we have to use Cryptodome
+        associated_data = b"\x11"
+        cipher = AES.new(self.bindkey, AES.MODE_CCM, nonce=nonce, mac_len=4)
+        cipher.update(associated_data)
 
+        assert cipher is not None  # nosec
+        # decrypt the data
         try:
-            decrypted_payload = cipher.decrypt(cipherpayload)
+            decrypted_payload = cipher.decrypt(encrypted_payload)
         except ValueError as error:
             self.bindkey_verified = False
             _LOGGER.warning("Decryption failed: %s", error)
             _LOGGER.debug("nonce: %s", nonce.hex())
-            _LOGGER.debug("cipherpayload: %s", cipherpayload.hex())
+            _LOGGER.debug("encrypted payload: %s", encrypted_payload.hex())
             return None
         if decrypted_payload is None:
             self.bindkey_verified = False

@@ -54,7 +54,7 @@ DEVICE_TYPES: dict[int, DeviceEntry] = {
         model="JQJCY01YM",
     ),
     0x0997: DeviceEntry(
-        name="Thermometer",
+        name="Smoke Detector",
         model="JTYJGD03MI",
     ),
     0x1568: DeviceEntry(
@@ -141,9 +141,21 @@ DEVICE_TYPES: dict[int, DeviceEntry] = {
         name="Smart Toothbrush",
         model="M1S-T500",
     ),
+    0x0806: DeviceEntry(
+        name="Smart Toothbrush",
+        model="T700",
+    ),
+    0x1790: DeviceEntry(
+        name="Smart Toothbrush",
+        model="T700",
+    ),
     0x0A8D: DeviceEntry(
         name="Motion Sensor",
         model="RTCGQ02LM",
+    ),
+    0x3531: DeviceEntry(
+        name="Motion Sensor",
+        model="XMPIRO2SXS",
     ),
     0x0863: DeviceEntry(
         name="Flood Detector",
@@ -166,7 +178,7 @@ DEVICE_TYPES: dict[int, DeviceEntry] = {
         model="XMWSDJ04MMC",
     ),
     0x1949: DeviceEntry(
-        name="Button",
+        name="Switch (double button)",
         model="XMWXKG01YL",
     ),
     0x2387: DeviceEntry(
@@ -188,6 +200,10 @@ DEVICE_TYPES: dict[int, DeviceEntry] = {
     0x07BF: DeviceEntry(
         name="Wireless Switch",
         model="YLAI003",
+    ),
+    0x38BB: DeviceEntry(
+        name="Wireless Switch",
+        model="PTX_YK1_QMIMB",
     ),
     0x0153: DeviceEntry(
         name="Remote Control",
@@ -228,6 +244,10 @@ DEVICE_TYPES: dict[int, DeviceEntry] = {
     0x0380: DeviceEntry(
         name="Door Lock",
         model="DSL-C08",
+    ),
+    0x11C2: DeviceEntry(
+        name="Door Lock",
+        model="Lockin-SV40",
     ),
     0x0DE7: DeviceEntry(
         name="Odor Eliminator",

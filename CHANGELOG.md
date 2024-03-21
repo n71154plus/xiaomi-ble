@@ -2,6 +2,146 @@
 
 <!--next-version-placeholder-->
 
+## v0.27.1 (2024-03-17)
+
+### Fix
+
+* Remove mac workaround ([#75](https://github.com/Bluetooth-Devices/xiaomi-ble/issues/75)) ([`c5a900c`](https://github.com/Bluetooth-Devices/xiaomi-ble/commit/c5a900c5d6e23b62769a16c0840ceed174c3a8da))
+
+## v0.27.0 (2024-03-10)
+
+### Feature
+
+* Add ptx and xmpiro2sx ([#74](https://github.com/Bluetooth-Devices/xiaomi-ble/issues/74)) ([`b0bb42f`](https://github.com/Bluetooth-Devices/xiaomi-ble/commit/b0bb42f777c9c5bdc6bc12590334bfc741b199a0))
+
+## v0.26.2 (2024-03-10)
+
+### Fix
+
+* Handle jagged stairstep for LYWSD03MMC humidity ([#73](https://github.com/Bluetooth-Devices/xiaomi-ble/issues/73)) ([`efb3229`](https://github.com/Bluetooth-Devices/xiaomi-ble/commit/efb322909933ac820b32012913ff3c35f9ca3659))
+
+## v0.26.1 (2024-02-18)
+
+### Fix
+
+* Typo in lock events ([#71](https://github.com/Bluetooth-Devices/xiaomi-ble/issues/71)) ([`9918c70`](https://github.com/Bluetooth-Devices/xiaomi-ble/commit/9918c7004f4ed4d12045bcb486dc762064e8510f))
+
+## v0.26.0 (2024-02-18)
+
+### Feature
+
+* Add support for locks and fingerprint readers ([#70](https://github.com/Bluetooth-Devices/xiaomi-ble/issues/70)) ([`2cffc70`](https://github.com/Bluetooth-Devices/xiaomi-ble/commit/2cffc70d451614a671833274947911a123a8f3b0))
+
+## v0.25.2 (2024-02-02)
+
+### Fix
+
+* Proper event_properties formatting ([#69](https://github.com/Bluetooth-Devices/xiaomi-ble/issues/69)) ([`86bced3`](https://github.com/Bluetooth-Devices/xiaomi-ble/commit/86bced38755551014d1273c69c6b80b79e3eb05a))
+
+## v0.25.1 (2024-02-02)
+
+### Fix
+
+* Rename rubiks_cube to cube ([#68](https://github.com/Bluetooth-Devices/xiaomi-ble/issues/68)) ([`65c7b3d`](https://github.com/Bluetooth-Devices/xiaomi-ble/commit/65c7b3d830bf9256ea60b8d8a15236a49b6ddd65))
+
+## v0.25.0 (2024-02-02)
+
+### Feature
+
+* Add dimmer and rubiks cube events ([#67](https://github.com/Bluetooth-Devices/xiaomi-ble/issues/67)) ([`33db2b0`](https://github.com/Bluetooth-Devices/xiaomi-ble/commit/33db2b09d360a9e2f010ac2ad2ec5d199e65cf3f))
+
+## v0.24.1 (2024-02-01)
+
+### Fix
+
+* Postfix plus and min ([#66](https://github.com/Bluetooth-Devices/xiaomi-ble/issues/66)) ([`d8caf82`](https://github.com/Bluetooth-Devices/xiaomi-ble/commit/d8caf825ea08bda7101c13f15d50db053c667e3c))
+
+## v0.24.0 (2024-01-31)
+
+### Feature
+
+* Add remote buttons ([#65](https://github.com/Bluetooth-Devices/xiaomi-ble/issues/65)) ([`380a803`](https://github.com/Bluetooth-Devices/xiaomi-ble/commit/380a80301e126150e87bb67e47c30c93dd28c0ff))
+
+## v0.23.1 (2024-01-28)
+
+### Fix
+
+* Use postfix id for double buttons ([#64](https://github.com/Bluetooth-Devices/xiaomi-ble/issues/64)) ([`6469a6d`](https://github.com/Bluetooth-Devices/xiaomi-ble/commit/6469a6dc2319549d5ee915135738573436c959da))
+
+## v0.23.0 (2024-01-27)
+
+### Feature
+
+* Add button devices with multiple buttons ([#63](https://github.com/Bluetooth-Devices/xiaomi-ble/issues/63)) ([`740679c`](https://github.com/Bluetooth-Devices/xiaomi-ble/commit/740679ce362d4201c816655e997f8223021fa7a1))
+
+## v0.22.0 (2024-01-27)
+
+### Feature
+
+* Add events for single button devices ([#62](https://github.com/Bluetooth-Devices/xiaomi-ble/issues/62)) ([`2110db9`](https://github.com/Bluetooth-Devices/xiaomi-ble/commit/2110db95c2670bfeda24ed7c0d0bf87bf559d45e))
+
+## v0.21.2 (2024-01-11)
+
+### Fix
+
+* Bump pycryptodomex ([#61](https://github.com/Bluetooth-Devices/xiaomi-ble/issues/61)) ([`8bcefae`](https://github.com/Bluetooth-Devices/xiaomi-ble/commit/8bcefaed9b8aa106cf37321793e147287779d4da))
+
+## v0.21.1 (2023-07-26)
+
+### Fix
+
+* Add unit of measurement to counter ([#56](https://github.com/Bluetooth-Devices/xiaomi-ble/issues/56)) ([`22956f8`](https://github.com/Bluetooth-Devices/xiaomi-ble/commit/22956f87269859e9ca94fb96c55a9a90fe45a4ac))
+
+## v0.21.0 (2023-07-26)
+
+### Feature
+
+* Add support for toothbrushes ([#55](https://github.com/Bluetooth-Devices/xiaomi-ble/issues/55)) ([`b3534f9`](https://github.com/Bluetooth-Devices/xiaomi-ble/commit/b3534f9daeef535372ffd5746d6662b1869f084e))
+
+## v0.20.0 (2023-07-23)
+
+### Feature
+
+* Add mi scale v1 ([#54](https://github.com/Bluetooth-Devices/xiaomi-ble/issues/54)) ([`57dc01a`](https://github.com/Bluetooth-Devices/xiaomi-ble/commit/57dc01a0f665af945540f7d01356030ce065b96a))
+
+## v0.19.1 (2023-07-20)
+
+### Fix
+
+* Remove some dependencies ([#53](https://github.com/Bluetooth-Devices/xiaomi-ble/issues/53)) ([`9d11d62`](https://github.com/Bluetooth-Devices/xiaomi-ble/commit/9d11d620557ec95d0bdf9112b8cf69e82031a006))
+
+## v0.19.0 (2023-07-20)
+
+### Feature
+
+* Switch from pycryptodomex to cryptography for v4 and v5 ([#48](https://github.com/Bluetooth-Devices/xiaomi-ble/issues/48)) ([`382beea`](https://github.com/Bluetooth-Devices/xiaomi-ble/commit/382beeadea23216c185428d2ada784a3e6fe6660))
+
+## v0.18.2 (2023-07-19)
+
+### Fix
+
+* Use only kg for mass ([#51](https://github.com/Bluetooth-Devices/xiaomi-ble/issues/51)) ([`93b5c9f`](https://github.com/Bluetooth-Devices/xiaomi-ble/commit/93b5c9ff0e0360b4c54d4bae603d0eb45198c8a3))
+
+## v0.18.1 (2023-07-17)
+
+### Fix
+
+* Use sensor state data for scale sensors ([#50](https://github.com/Bluetooth-Devices/xiaomi-ble/issues/50)) ([`fcfa510`](https://github.com/Bluetooth-Devices/xiaomi-ble/commit/fcfa5100dfebb9dd451afdb7395eef530c7f3abb))
+
+## v0.18.0 (2023-07-16)
+
+### Feature
+
+* Add support for mi body composition scale 2 ([#47](https://github.com/Bluetooth-Devices/xiaomi-ble/issues/47)) ([`3755aed`](https://github.com/Bluetooth-Devices/xiaomi-ble/commit/3755aede1da4e4a11c5534ef1b731a33f6f2b39c))
+
+## v0.17.2 (2023-06-03)
+### Fix
+* Jtyjgd03mmi is now detected as smoke sensor ([#46](https://github.com/Bluetooth-Devices/xiaomi-ble/issues/46)) ([`9e06702`](https://github.com/Bluetooth-Devices/xiaomi-ble/commit/9e0670252ebe9802fdf5eaec030f23813090da02))
+
+## v0.17.1 (2023-05-21)
+### Fix
+* Add sleepy_device property ([#44](https://github.com/Bluetooth-Devices/xiaomi-ble/issues/44)) ([`fac1009`](https://github.com/Bluetooth-Devices/xiaomi-ble/commit/fac1009acdd4a31daa9e50eb6fffea6d0bff1702))
+
 ## v0.17.0 (2023-04-03)
 ### Feature
 * Add updated lywsd02mmc device type and mmc w505 body temperature sensor ([`23f85e2`](https://github.com/Bluetooth-Devices/xiaomi-ble/commit/23f85e29e887e042fe2eeea83b15ca2e1beeea08))
